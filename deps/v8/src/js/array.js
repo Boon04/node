@@ -58,24 +58,26 @@ function GetSortedArrayKeys(array, indices) {
 }
 
 
-function SparseJoinWithSeparatorJS(array, keys, length, use_locale, separator) {
+function SparseJoinWithSeparatorJS(
+    array, keys, length, use_locale, separator, locales, options) {
   var keys_length = keys.length;
   var elements = new InternalArray(keys_length * 2);
   for (var i = 0; i < keys_length; i++) {
     var key = keys[i];
     elements[i * 2] = key;
-    elements[i * 2 + 1] = ConvertToString(use_locale, array[key]);
+    elements[i * 2 + 1] = ConvertToString(
+        use_locale, array[key], locales, options);
   }
   return %SparseJoinWithSeparator(elements, length, separator);
 }
 
 
 // Optimized for sparse arrays if separator is ''.
-function SparseJoin(array, keys, use_locale) {
+function SparseJoin(array, keys, use_locale, locales, options) {
   var keys_length = keys.length;
   var elements = new InternalArray(keys_length);
   for (var i = 0; i < keys_length; i++) {
-    elements[i] = ConvertToString(use_locale, array[keys[i]]);
+    elements[i] = ConvertToString(use_locale, array[keys[i]], locales, options);
   }
   return %StringBuilderConcat(elements, keys_length, '');
 }
@@ -128,28 +130,29 @@ function StackHas(stack, v) {
 // join invocations.
 var visited_arrays = new Stack();
 
-function DoJoin(array, length, is_array, separator, use_locale) {
+function DoJoin(
+    array, length, is_array, separator, use_locale, locales, options) {
   if (UseSparseVariant(array, length, is_array, length)) {
     %NormalizeElements(array);
     var keys = GetSortedArrayKeys(array, %GetArrayKeys(array, length));
     if (separator === '') {
       if (keys.length === 0) return '';
-      return SparseJoin(array, keys, use_locale);
+      return SparseJoin(array, keys, use_locale, locales, options);
     } else {
       return SparseJoinWithSeparatorJS(
-          array, keys, length, use_locale, separator);
+          array, keys, length, use_locale, separator, locales, options);
     }
   }
 
   // Fast case for one-element arrays.
   if (length === 1) {
-    return ConvertToString(use_locale, array[0]);
+    return ConvertToString(use_locale, array[0], locales, options);
   }
 
   // Construct an array for the elements.
   var elements = new InternalArray(length);
   for (var i = 0; i < length; i++) {
-    elements[i] = ConvertToString(use_locale, array[i]);
+    elements[i] = ConvertToString(use_locale, array[i], locales, options);
   }
 
   if (separator === '') {
@@ -159,7 +162,7 @@ function DoJoin(array, length, is_array, separator, use_locale) {
   }
 }
 
-function Join(array, length, separator, use_locale) {
+function Join(array, length, separator, use_locale, locales, options) {
   if (length === 0) return '';
 
   var is_array = IS_ARRAY(array);
@@ -173,7 +176,8 @@ function Join(array, length, separator, use_locale) {
 
   // Attempt to convert the elements.
   try {
-    return DoJoin(array, length, is_array, separator, use_locale);
+    return DoJoin(
+        array, length, is_array, separator, use_locale, locales, options);
   } finally {
     // Make sure to remove the last element of the visited array no
     // matter what happens.
@@ -182,39 +186,19 @@ function Join(array, length, separator, use_locale) {
 }
 
 
-function ConvertToString(use_locale, x) {
+function ConvertToString(use_locale, x, locales, options) {
   if (IS_NULL_OR_UNDEFINED(x)) return '';
-  return TO_STRING(use_locale ? x.toLocaleString() : x);
-}
-
-
-// This function implements the optimized splice implementation that can use
-// special array operations to handle sparse arrays in a sensible fashion.
-function SparseSlice(array, start_i, del_count, len, deleted_elements) {
-  // Move deleted elements to a new array (the return value from splice).
-  var indices = %GetArrayKeys(array, start_i + del_count);
-  if (IS_NUMBER(indices)) {
-    var limit = indices;
-    for (var i = start_i; i < limit; ++i) {
-      var current = array[i];
-      if (!IS_UNDEFINED(current) || i in array) {
-        %CreateDataProperty(deleted_elements, i - start_i, current);
-      }
+  if (use_locale) {
+    if (IS_NULL_OR_UNDEFINED(locales)) {
+      return TO_STRING(x.toLocaleString());
+    } else if (IS_NULL_OR_UNDEFINED(options)) {
+      return TO_STRING(x.toLocaleString(locales));
     }
-  } else {
-    var length = indices.length;
-    for (var k = 0; k < length; ++k) {
-      var key = indices[k];
-      if (key >= start_i) {
-        var current = array[key];
-        if (!IS_UNDEFINED(current) || key in array) {
-          %CreateDataProperty(deleted_elements, key - start_i, current);
-        }
-      }
-    }
+    return TO_STRING(x.toLocaleString(locales, options));
   }
-}
 
+  return TO_STRING(x);
+}
 
 // This function implements the optimized splice implementation that can use
 // special array operations to handle sparse arrays in a sensible fashion.
@@ -347,17 +331,21 @@ DEFINE_METHOD(
   }
 );
 
-function InnerArrayToLocaleString(array, length) {
-  return Join(array, TO_LENGTH(length), ',', true);
+// ecma402 #sup-array.prototype.tolocalestring
+function InnerArrayToLocaleString(array, length, locales, options) {
+  return Join(array, TO_LENGTH(length), ',', true, locales, options);
 }
 
 
 DEFINE_METHOD(
   GlobalArray.prototype,
+  // ecma402 #sup-array.prototype.tolocalestring
   toLocaleString() {
     var array = TO_OBJECT(this);
     var arrayLen = array.length;
-    return InnerArrayToLocaleString(array, arrayLen);
+    var locales = arguments[0];
+    var options = arguments[1];
+    return InnerArrayToLocaleString(array, arrayLen, locales, options);
   }
 );
 
@@ -389,46 +377,6 @@ DEFINE_METHOD(
     return InnerArrayJoin(separator, array, length);
   }
 );
-
-
-// Removes the last element from the array and returns it. See
-// ECMA-262, section 15.4.4.6.
-function ArrayPopFallback() {
-  var array = TO_OBJECT(this);
-  var n = TO_LENGTH(array.length);
-  if (n == 0) {
-    array.length = n;
-    return;
-  }
-
-  n--;
-  var value = array[n];
-  delete array[n];
-  array.length = n;
-  return value;
-}
-
-
-// Appends the arguments to the end of the array and returns the new
-// length of the array. See ECMA-262, section 15.4.4.7.
-function ArrayPushFallback() {
-  var array = TO_OBJECT(this);
-  var n = TO_LENGTH(array.length);
-  var m = arguments.length;
-
-  // Subtract n from kMaxSafeInteger rather than testing m + n >
-  // kMaxSafeInteger. n may already be kMaxSafeInteger. In that case adding
-  // e.g., 1 would not be safe.
-  if (m > kMaxSafeInteger - n) throw %make_type_error(kPushPastSafeLength, m, n);
-
-  for (var i = 0; i < m; i++) {
-    array[i+n] = arguments[i];
-  }
-
-  var new_length = n + m;
-  array.length = new_length;
-  return new_length;
-}
 
 
 // For implementing reverse() on large, sparse arrays.
@@ -588,83 +536,6 @@ function ArraySliceFallback(start, end) {
   return null;
 }
 
-function ComputeSpliceStartIndex(start_i, len) {
-  if (start_i < 0) {
-    start_i += len;
-    return start_i < 0 ? 0 : start_i;
-  }
-
-  return start_i > len ? len : start_i;
-}
-
-
-function ComputeSpliceDeleteCount(delete_count, num_arguments, len, start_i) {
-  // SpiderMonkey, TraceMonkey and JSC treat the case where no delete count is
-  // given as a request to delete all the elements from the start.
-  // And it differs from the case of undefined delete count.
-  // This does not follow ECMA-262, but we do the same for
-  // compatibility.
-  var del_count = 0;
-  if (num_arguments == 1)
-    return len - start_i;
-
-  del_count = TO_INTEGER(delete_count);
-  if (del_count < 0)
-    return 0;
-
-  if (del_count > len - start_i)
-    return len - start_i;
-
-  return del_count;
-}
-
-
-function ArraySpliceFallback(start, delete_count) {
-  var num_arguments = arguments.length;
-  var array = TO_OBJECT(this);
-  var len = TO_LENGTH(array.length);
-  var start_i = ComputeSpliceStartIndex(TO_INTEGER(start), len);
-  var del_count = ComputeSpliceDeleteCount(delete_count, num_arguments, len,
-                                           start_i);
-  var num_elements_to_add = num_arguments > 2 ? num_arguments - 2 : 0;
-
-  const new_len = len - del_count + num_elements_to_add;
-  if (new_len >= 2**53) throw %make_type_error(kInvalidArrayLength);
-
-  var deleted_elements = ArraySpeciesCreate(array, del_count);
-  deleted_elements.length = del_count;
-
-  var changed_elements = del_count;
-  if (num_elements_to_add != del_count) {
-    // If the slice needs to do a actually move elements after the insertion
-    // point, then include those in the estimate of changed elements.
-    changed_elements += len - start_i - del_count;
-  }
-  if (UseSparseVariant(array, len, IS_ARRAY(array), changed_elements)) {
-    %NormalizeElements(array);
-    if (IS_ARRAY(deleted_elements)) %NormalizeElements(deleted_elements);
-    SparseSlice(array, start_i, del_count, len, deleted_elements);
-    SparseMove(array, start_i, del_count, len, num_elements_to_add);
-  } else {
-    SimpleSlice(array, start_i, del_count, len, deleted_elements);
-    SimpleMove(array, start_i, del_count, len, num_elements_to_add);
-  }
-
-  // Insert the arguments into the resulting array in
-  // place of the deleted elements.
-  var i = start_i;
-  var arguments_index = 2;
-  var arguments_length = arguments.length;
-  while (arguments_index < arguments_length) {
-    array[i++] = arguments[arguments_index++];
-  }
-  array.length = new_len;
-
-  // Return the deleted elements.
-  return deleted_elements;
-}
-
-
 function InnerArraySort(array, length, comparefn) {
   // In-place QuickSort algorithm.
   // For short (length <= 10) arrays, insertion sort is used for efficiency.
@@ -822,7 +693,6 @@ function InnerArraySort(array, length, comparefn) {
   return array;
 }
 
-
 DEFINE_METHOD(
   GlobalArray.prototype,
   sort(comparefn) {
@@ -835,6 +705,7 @@ DEFINE_METHOD(
     return InnerArraySort(array, length, comparefn);
   }
 );
+
 
 DEFINE_METHOD_LEN(
   GlobalArray.prototype,
@@ -876,16 +747,8 @@ DEFINE_METHOD_LEN(
       }
     }
     // Lookup through the array.
-    if (!IS_UNDEFINED(element)) {
-      for (var i = max; i >= min; i--) {
-        if (array[i] === element) return i;
-      }
-      return -1;
-    }
     for (var i = max; i >= min; i--) {
-      if (IS_UNDEFINED(array[i]) && i in array) {
-        return i;
-      }
+      if (i in array && array[i] === element) return i;
     }
     return -1;
   },
@@ -893,93 +756,6 @@ DEFINE_METHOD_LEN(
 );
 
 
-// ES#sec-array.prototype.copywithin
-// (Array.prototype.copyWithin ( target, start [ , end ] )
-DEFINE_METHOD_LEN(
-  GlobalArray.prototype,
-  copyWithin(target, start, end) {
-    var array = TO_OBJECT(this);
-    var length = TO_LENGTH(array.length);
-
-    target = TO_INTEGER(target);
-    var to;
-    if (target < 0) {
-      to = MathMax(length + target, 0);
-    } else {
-      to = MathMin(target, length);
-    }
-
-    start = TO_INTEGER(start);
-    var from;
-    if (start < 0) {
-      from = MathMax(length + start, 0);
-    } else {
-      from = MathMin(start, length);
-    }
-
-    end = IS_UNDEFINED(end) ? length : TO_INTEGER(end);
-    var final;
-    if (end < 0) {
-      final = MathMax(length + end, 0);
-    } else {
-      final = MathMin(end, length);
-    }
-
-    var count = MathMin(final - from, length - to);
-    var direction = 1;
-    if (from < to && to < (from + count)) {
-      direction = -1;
-      from = from + count - 1;
-      to = to + count - 1;
-    }
-
-    while (count > 0) {
-      if (from in array) {
-        array[to] = array[from];
-      } else {
-        delete array[to];
-      }
-      from = from + direction;
-      to = to + direction;
-      count--;
-    }
-
-    return array;
-  },
-  2  /* Set function length */
-);
-
-
-// ES6, draft 04-05-14, section 22.1.3.6
-DEFINE_METHOD_LEN(
-  GlobalArray.prototype,
-  fill(value, start, end) {
-    var array = TO_OBJECT(this);
-    var length = TO_LENGTH(array.length);
-
-    var i = IS_UNDEFINED(start) ? 0 : TO_INTEGER(start);
-    var end = IS_UNDEFINED(end) ? length : TO_INTEGER(end);
-
-    if (i < 0) {
-      i += length;
-      if (i < 0) i = 0;
-    } else {
-      if (i > length) i = length;
-    }
-
-    if (end < 0) {
-      end += length;
-      if (end < 0) end = 0;
-    } else {
-      if (end > length) end = length;
-    }
-
-    for (; i < end; i++)
-      array[i] = value;
-    return array;
-  },
-  1  /* Set function length */
-);
 
 // Set up unscopable properties on the Array.prototype object.
 var unscopables = {
@@ -1050,7 +826,6 @@ utils.Export(function(to) {
   to.ArrayToString = ArrayToString;
   to.ArrayValues = ArrayValues;
   to.InnerArrayJoin = InnerArrayJoin;
-  to.InnerArraySort = InnerArraySort;
   to.InnerArrayToLocaleString = InnerArrayToLocaleString;
 });
 
@@ -1060,10 +835,7 @@ utils.Export(function(to) {
   "array_keys_iterator", ArrayKeys,
   "array_values_iterator", ArrayValues,
   // Fallback implementations of Array builtins.
-  "array_pop", ArrayPopFallback,
-  "array_push", ArrayPushFallback,
   "array_shift", ArrayShiftFallback,
-  "array_splice", ArraySpliceFallback,
   "array_unshift", ArrayUnshiftFallback,
 ]);
 
